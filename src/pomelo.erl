@@ -1,7 +1,7 @@
 -module(pomelo).
 
-%% -export([]).
--compile(export_all).
+-export([init/4, loop/1]).
+%% -compile(export_all).
 
 -define(HANDSHAKE, 1).
 -define(HANDSHAKE_ACK, 2).
@@ -28,7 +28,7 @@
 
 init(Host, Port, Robot_Pid, Server_Type) ->
 %% 	io:format("[~p] pomelo start on Host: ~p, Port: ~p, Robot Pid: ~p ~n", [self(), Host, Port, Robot_Pid]),
-	case gen_tcp:connect(Host, Port, [binary, {packet, 0}, {active, true}]) of
+	case gen_tcp:connect(Host, Port, [binary, {packet, 0}, {active, once}]) of
 		{ok, Socket} ->
 			Rid = ?HANDSHAKE,
 			Routes = dict:store(Rid, Server_Type, dict:new()),
@@ -48,16 +48,11 @@ init(Host, Port, Robot_Pid, Server_Type) ->
 			{error, Reason}
 	end.
 
-%% ====================================================================
-%% Internal functions
-%% ====================================================================
-
 loop(Opts) ->
 %% 	io:format("[~p] socket receiving ... ~n", [self()]),
 	receive
 		{send, Socket, Bin} ->
 			ok = gen_tcp:send(Socket, list_to_binary(Bin)),
-%% 			inet:setopts(Socket, [{active, once}]),
 			loop(Opts);
 		{request, Route, Msg, Delay} ->
 			{ok, Bin, New_Opts} = message_encode(?REQUEST, Route, Msg, Opts),
@@ -86,29 +81,39 @@ loop(Opts) ->
 				is_binary(SoFar) ->
 					{ok, Rest, _, _} = package_decode(Socket, <<SoFar/binary, Bin/binary>>, Opts),
 					New_Opts = Opts#pomelo_opts{rest = Rest},
+					inet:setopts(Opts#pomelo_opts.socket, [{active, once}]),
 					loop(New_Opts);
 				true ->
 					{ok, Rest, _, _} = package_decode(Socket, Bin, Opts),
 					New_Opts = Opts#pomelo_opts{rest = Rest},
+					inet:setopts(Opts#pomelo_opts.socket, [{active, once}]),
 					loop(New_Opts)
 			end;
-%% 			io:format("rest: ~p~n", [Rest]),
-%% 			New_Opts = Opts#pomelo_opts{rest = Rest},
-%% 			inet:setopts(Opts#pomelo_opts.socket, [{active, once}]),
-%% 			loop(New_Opts);
 		{tcp_closed, Socket} ->
-			io:format("[~p] server close ... ~p ~n", [self(), Socket]);
+			io:format("[~p] server close ... ~p ~n", [self(), Socket]),
+			Opts#pomelo_opts.pid ! stop;
 		{disconnect} ->
 %% 			io:format("[~p] client close ... ~p ~n", [self(), Opts#pomelo_opts.socket]),
 			gen_tcp:close(Opts#pomelo_opts.socket)
-	after 60000 ->
-			receive
-				Any ->
-					io:format("[~p] any rest: ~p ~n", [self(), Any]),
-					gen_tcp:close(Opts#pomelo_opts.socket)
-			end,
-			Opts#pomelo_opts.pid ! stop
+%% 	after 11000 ->
+%% 			io:format("[~p] time out ... ~n", [self()]),
+%% 			receive
+%% 				Any ->
+%% 					if size(Any) > 0 ->
+%% 						   io:format("[~p] size: ~p, any: ~p ~n", [self(), size(Any), Any]),
+%% 						   inet:setopts(Opts#pomelo_opts.socket, [{active, once}]),
+%% 						   loop(Opts);
+%% 					   true -> 
+%% 						   io:format("[~p] size: ~p, any: ~p ~n", [self(), size(Any), Any]),
+%% 						   gen_tcp:close(Opts#pomelo_opts.socket),
+%% 						   Opts#pomelo_opts.pid ! stop
+%% 					end
+%% 			end
   	end.
+
+%% ====================================================================
+%% Internal functions
+%% ====================================================================
 
 send_data(Pid, Socket, Bin, Delay) ->
 	erlang:send_after(Delay, Pid, {send, Socket, Bin}),
@@ -119,7 +124,7 @@ send_data(Socket, Bin) ->
 
 send_handshake(Opts) ->
 	Info = {obj,[{"sys",{obj,[{"type","pomelo-erlang-tcp"},
-							{"version","0.0.1a"},
+							{"version","0.0.2a"},
 							{"pomelo","0.7.x"}]}}]},
 	Json = rfc4627:encode_noauto(Info),
 	Bin = package_encode(?HANDSHAKE, Json),
@@ -212,7 +217,8 @@ message_encode(Type, Route, Msg, Opts) when Type =:= ?REQUEST ->
 	Json = rfc4627:encode_noauto(Msg),
 	Rid = Opts#pomelo_opts.rid,
 	Routes = dict:store(Rid, Route, Opts#pomelo_opts.routes),
-	New_Opts = Opts#pomelo_opts{rid = Rid + 1, routes = Routes},
+	New_Opts = Opts#pomelo_opts{rid = (if Rid + 1 >= 127 -> ?REQUEST_START_ID; true -> Rid + 1 end), 
+								routes = Routes},
 	Param1 = Type bsl 1 bor 0,
 	Param2 = write_message_id(Rid),
 	Param3 = length(Route),
@@ -247,13 +253,13 @@ encode_message_id(Id, List) when Id > 0 ->
 	New_List = [(Id band 127 bor 128)|List],
 	New_Id = Id bsr 7,
 	encode_message_id(New_Id, New_List);
-encode_message_id(Id, List) -> List.
+encode_message_id(_, List) -> List.
 
 read_message_id(T, Bin) when (T =:= ?REQUEST) or (T =:= ?RESPONSE) -> 
 	{Byte, Rest} = read_byte(Bin),
 	Id = Byte band 127,
 	decode_message_id(Id, Rest);
-read_message_id(T, Bin) -> {0, Bin}.
+read_message_id(_, Bin) -> {0, Bin}.
 
 decode_message_id(Id, Bin) when Bin band 128 -> 
 	Temp_Id = Id bsl 7,
