@@ -3,7 +3,11 @@ Pomelo-Erlang-TCP
 
 这是一个用来支持 pomelo-hybridconnector(tcp) 的 erlang 通讯组件，底层使用的是 socket 的二进制协议，json 解析部分用的是 rfc4627
 
-目前版本：0.0.1a
+目前版本：0.0.2a
+
+修复：
+
+1. 修复 request id 到达 127 的 bug，现在 127 后会重设回 1
 
 目前功能：
 
